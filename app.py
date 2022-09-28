@@ -1,4 +1,3 @@
-from requests_oauthlib import OAuth2Session
 from flask import Flask, url_for, redirect, render_template, session, request
 
 import base64
@@ -6,39 +5,23 @@ import hashlib
 import os
 import re
 import logging
+import requests
+import json
 
 logging.basicConfig(filename='log.log', filemode='w', level=logging.DEBUG)
 
 app = Flask(__name__)
-app.secret_key = 'VerySecretKey'
+app.secret_key = os.environ.get('SECRET_KEY')
 
-client_id = 'vsas_vismanet_connect_interactive'
-client_secret = 'j6y8ZmZMXzUqLZT5x2UNoZrk8sLlC09LQF76OOatt0MHyKhnIxlSq6weTwlYMO4a'
 authorize_url = 'https://connect.visma.com/connect/authorize'
 token_url = 'https://connect.visma.com/connect/token'
 
-code_verifier = base64.urlsafe_b64encode(os.urandom(30)).decode("utf-8")
-code_verifier = re.sub("[^a-zA-Z0-9]+", "", code_verifier)
+# code_verifier = base64.urlsafe_b64encode(os.urandom(30)).decode("utf-8")
+# code_verifier = re.sub("[^a-zA-Z0-9]+", "", code_verifier)
 
-code_challenge = hashlib.sha256(code_verifier.encode("utf-8")).digest()
-code_challenge = base64.urlsafe_b64encode(code_challenge).decode("utf-8")
-code_challenge = code_challenge.replace("=", "")
-
-# oauth = OAuth(app)
-# oauth.register(
-#     name='vismaconnect',
-#     client_id='vsas_vismanet_connect_interactive',
-#     client_secret='j6y8ZmZMXzUqLZT5x2UNoZrk8sLlC09LQF76OOatt0MHyKhnIxlSq6weTwlYMO4a',
-#     access_token_url='https://connect.visma.com/connect/token',
-#     access_token_params=None,
-#     authorize_url='https://connect.visma.com/connect/authorize',
-#     authorize_params={
-#         'scope': 'vismanet_erp_interactive_api:create vismanet_erp_interactive_api:delete vismanet_erp_interactive_api:read vismanet_erp_interactive_api:update'
-#     },
-#     client_kwarg={
-#         'scope': 'vismanet_erp_interactive_api:create vismanet_erp_interactive_api:delete vismanet_erp_interactive_api:read vismanet_erp_interactive_api:update'
-#     }
-# )
+# code_challenge = hashlib.sha256(code_verifier.encode("utf-8")).digest()
+# code_challenge = base64.urlsafe_b64encode(code_challenge).decode("utf-8")
+# code_challenge = code_challenge.replace("=", "")
 
 @app.route('/')
 def index():
@@ -47,47 +30,57 @@ def index():
 @app.route('/login')
 def login():
 
-    """Step 1: User Authorization.
+    state = base64.urlsafe_b64encode(os.urandom(30)).decode("utf-8")
 
-    Redirect the user/resource owner to the OAuth provider (i.e. Github)
-    using an URL with a few key OAuth parameters.
-    """
-    vismaconnect = OAuth2Session(client_id, 
-        redirect_uri="https://127.0.0.1:5000/authorize", 
-        scope="vismanet_erp_interactive_api:create vismanet_erp_interactive_api:delete vismanet_erp_interactive_api:read vismanet_erp_interactive_api:update",
-        )
+    auth_request = authorize_url
+    auth_request += "?response_type=code"
+    auth_request += "&client_id=" + os.environ.get('CLIENT_ID')
+    auth_request += "&redirect_uri=" + url_for('authorize', _external=True) 
+    auth_request += "&scope=vismanet_erp_interactive_api:create vismanet_erp_interactive_api:delete vismanet_erp_interactive_api:read vismanet_erp_interactive_api:update"
+    auth_request += "&state=" + state
+    # auth_request += "&code_challenge=" + code_challenge
+    # auth_request += "&code_challenge_method=S256"
 
-    authorization_url, state = vismaconnect.authorization_url(authorize_url,
-        code_challenge=code_challenge, 
-        code_challenge_method="S256")
+    session['state'] = state
 
-    # State is used to prevent CSRF, keep this for later.
-    session['oauth_state'] = state
-
-    return redirect(authorization_url)    
+    return redirect(auth_request)          
 
 @app.route('/authorize')    
 def authorize():
+    
+    code = request.args['code']
+    state = request.args['state']
 
-    code = request.args.get("code")    
-    """ Step 3: Retrieving an access token.
+    if state == session['state']:
+    
+        reqdata = "grant_type=authorization_code" 
+        reqdata += "&code=" + code
+        reqdata += "&client_id=" + os.environ.get('CLIENT_ID')
+        reqdata += "&client_secret=" + os.environ.get('CLIENT_SECRET')
+        reqdata += "&redirect_uri=" + url_for('authorize', _external=True) 
+        # reqdata += "&code_verifier=" + code_verifier        
+        
+        response = requests.post(token_url,
+                                data=reqdata,
+                                headers={'Content-Type': 'application/x-www-form-urlencoded'}
+                                )
 
-    The user has been redirected back from the provider to your registered
-    callback URL. With this redirection comes an authorization code included
-    in the redirect URL. We will use that to obtain an access token.
-    """
-    vismaconnect = OAuth2Session(client_id, state=session['oauth_state'])
-    token = vismaconnect.fetch_token(token_url,
-        client_secret=client_secret,        
-        code_verifier=code_verifier,
-        code=code
-        )
+        if response.status_code == 200:
+            json_data = json.loads(response.text)
+            session["access_token"] = json_data["access_token"]
 
-        # authorization_response=request.url,
+    return redirect("/inventory")
 
-    # At this point you can fetch protected resources but lets save
-    # the token and show how this is done from a persisted token
-    # in /profile.
-    session['oauth_token'] = token
+@app.route('/inventory')
+def inventory():
 
-    return redirect('/')
+    response = requests.get("https://integration.visma.net/API/controller/api/v1/inventory/?pageSize=10",                          
+                            headers={
+                                'Accept': 'application/json',
+                                'Authorization': 'Bearer ' + session['access_token']                                
+                            }
+                        )
+
+    if response.status_code == 200:
+        result = json.loads(response.text)
+        
